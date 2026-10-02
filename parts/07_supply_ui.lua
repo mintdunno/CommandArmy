@@ -2,30 +2,8 @@
 
 --==================================================
 
-local function getMatchUI()
-
-    return player.PlayerGui
-
-        :FindFirstChild("MatchUI")
-
-end
-
-local function getSupplyMenu()
-
-    local matchUI =
-
-        getMatchUI()
-
-    return matchUI
-
-        and matchUI:FindFirstChild(
-
-            "SupplyPoint"
-
-        )
-
-        or nil
-
+local function canAutomateTroops()
+    return isMatchContext(getActiveMapModel())
 end
 
 local function waitForSupplyMenu()
@@ -41,6 +19,12 @@ local function waitForSupplyMenu()
             < CONFIG.MenuTimeout
 
     do
+
+        if not canAutomateTroops() then
+            STATE.zeroSince = nil
+            STATE.troopActive = false
+            return false
+        end
 
         local menu =
 
@@ -61,6 +45,8 @@ local function waitForSupplyMenu()
 end
 
 local function openSupplyMenu(supply)
+
+    if not canAutomateTroops() then return false, "PLAYER_STATE_PAUSED" end
 
     if not isInsideSupplyCamp(supply) then
 

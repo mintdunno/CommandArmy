@@ -107,6 +107,7 @@ end
 local function getPromptPosition(prompt)
 
     local parent = prompt.Parent
+    if not parent then return nil end
 
     if parent:IsA("Attachment") then
 
@@ -127,7 +128,9 @@ end
 local function isInsideSupplyCamp(supply)
     local map = getActiveMapModel()
     local character = player.Character
+    local prefix = getTeamSupplyPrefix()
     if not supply or not map or not supply:IsDescendantOf(map)
+        or not prefix or supply.Name:sub(1, #prefix) ~= prefix
         or not character or not character:FindFirstChild("HumanoidRootPart")
         or not isMatchContext(map) then return false end
 
@@ -141,9 +144,8 @@ local function isInsideSupplyCamp(supply)
     -- CapturePoint every time this function is called.
     -- X/Z is intentional: CapturePoint is often a thin floor part,
     -- while HumanoidRootPart sits several studs above it.
-    local localPosition = point.CFrame:PointToObjectSpace(
-        getRoot().Position
-    )
+    local root = character:FindFirstChild("HumanoidRootPart")
+    local localPosition = point.CFrame:PointToObjectSpace(root.Position)
 
     local half = point.Size / 2
     local margin = 1
@@ -217,6 +219,14 @@ end
 -- Finds the team supply with the shortest actual route.
 
 local function getBestTeamSupply()
+    local map, character, runId = getActiveMapModel(), player.Character, STATE.runId
+    local team, campMode, selectedCamp, movementMode = getCurrentTeam(), CONFIG.CampMode, CONFIG.SelectedCamp, CONFIG.MovementMode
+    local function stillValid()
+        return STATE.runId == runId and player.Character == character and isMatchContext(map)
+            and getCurrentTeam() == team and CONFIG.CampMode == campMode
+            and CONFIG.SelectedCamp == selectedCamp and CONFIG.MovementMode == movementMode
+    end
+    if not stillValid() then return nil, "LOCATION_CHANGED" end
     local supplies,prefix=getSuppliesFolder(),getTeamSupplyPrefix()
     if not supplies then return nil,"NO_SUPPLIES" end
     if not prefix then return nil,"NO_TEAM" end
@@ -228,25 +238,33 @@ local function getBestTeamSupply()
     local currentCamp=getCurrentTeamCamp()
     if currentCamp then return currentCamp,0 end
     local bestSupply,bestDistance=nil,math.huge
+    local lastPathError
     for _,supply in ipairs(supplies:GetChildren()) do
+        if not stillValid() or isCampInteractionActive() then return nil, "LOCATION_CHANGED" end
         if supply.Name:sub(1,#prefix)==prefix then
             local prompt=getSupplyPrompt(supply)
             if prompt and prompt.Enabled then
                 local target=getPromptPosition(prompt)
                 if target then
                     local distance
-                    if CONFIG.MovementMode=="TP" then distance=(getRoot().Position-target).Magnitude
+                    if CONFIG.MovementMode=="TP" then
+                        local root=character:FindFirstChild("HumanoidRootPart")
+                        if not root then return nil,"CHARACTER_CHANGED" end
+                        distance=(root.Position-target).Magnitude
                     else
-                        local path,_,routeDistance=computePath(target)
+                        local path,_,routeDistance,pathError=computePath(target)
                         distance=routeDistance
+                        if pathError then lastPathError=pathError end
                         if path then path:Destroy() end
                     end
-                    if distance and distance<bestDistance then bestSupply,bestDistance=supply,distance end
+                    if not stillValid() or isCampInteractionActive() then return nil,"LOCATION_CHANGED" end
+                    if supply:IsDescendantOf(map) and prompt.Parent and prompt.Enabled
+                        and distance and distance<bestDistance then bestSupply,bestDistance=supply,distance end
                 end
             end
         end
     end
-    if not bestSupply then return nil,"NO_REACHABLE_SUPPLY" end
+    if not bestSupply then return nil,lastPathError or "NO_REACHABLE_SUPPLY" end
     return bestSupply,bestDistance
 end
 
@@ -256,7 +274,16 @@ local function runIntoSupplyCamp(supply)
     local map = getActiveMapModel()
     if not CONFIG.AutoCamp then return false, "AUTO_CAMP_OFF" end
     local movementMode = CONFIG.MovementMode
-    if not CONFIG.AutoCamp or not isMatchContext(map) then return false, "LOCATION_CHANGED" end
+    if not canNavigateCamp(map) or not supply or not supply:IsDescendantOf(map) then
+        return false, "LOCATION_CHANGED"
+    end
+    local character, team = player.Character, getCurrentTeam()
+    local campMode, selectedCamp = CONFIG.CampMode, CONFIG.SelectedCamp
+    local function stillValid()
+        return canNavigateCamp(map) and player.Character == character
+            and getCurrentTeam() == team and CONFIG.CampMode == campMode
+            and CONFIG.SelectedCamp == selectedCamp and supply:IsDescendantOf(map)
+    end
 
     if isInsideSupplyCamp(supply) then
 
@@ -300,6 +327,7 @@ local function runIntoSupplyCamp(supply)
         return false, reason
 
     end
+    if not stillValid() then return false, "LOCATION_CHANGED" end
 
     if isInsideSupplyCamp(supply) then
 
@@ -321,7 +349,7 @@ local function runIntoSupplyCamp(supply)
             < CONFIG.CampEnterTimeout
 
     do
-        if not CONFIG.AutoCamp or not isMatchContext(map) then
+        if not stillValid() then
             stopMovement()
             return false, "LOCATION_CHANGED"
         end
@@ -334,11 +362,17 @@ local function runIntoSupplyCamp(supply)
 
         end
 
+        local root = character:FindFirstChild("HumanoidRootPart")
+        local humanoid = character:FindFirstChild("Humanoid")
+        if not root or not humanoid or humanoid.Health <= 0 or not point.Parent then
+            stopMovement()
+            return false, "CHARACTER_OR_CAMP_CHANGED"
+        end
         local offset =
 
             point.Position
 
-            - getRoot().Position
+            - root.Position
 
         local direction = Vector3.new(
 
@@ -352,7 +386,7 @@ local function runIntoSupplyCamp(supply)
 
         if direction.Magnitude > 0.1 then
 
-            getHumanoid():Move(
+            humanoid:Move(
 
                 direction.Unit,
 

@@ -122,16 +122,22 @@ local function createPath()
 end
 
 local function computePath(targetPosition)
-
-    local root = getRoot()
+    local character = player.Character
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    local humanoid = character and character:FindFirstChild("Humanoid")
+    local map, runId = getActiveMapModel(), STATE.runId
+    if not root or not humanoid or humanoid.Health <= 0 or not isMatchContext(map) then
+        return nil
+    end
+    local startPosition = root.Position
 
     local path = createPath()
 
-    local success = pcall(function()
+    local success, computeError = pcall(function()
 
         path:ComputeAsync(
 
-            root.Position,
+            startPosition,
 
             targetPosition
 
@@ -139,11 +145,19 @@ local function computePath(targetPosition)
 
     end)
 
+    if STATE.runId ~= runId or player.Character ~= character or not root.Parent
+        or humanoid.Health <= 0 or not isMatchContext(map) then
+        path:Destroy()
+        return nil
+    end
+    if not success then
+        path:Destroy()
+        return nil, nil, nil, "PATH_COMPUTE_ERROR: " .. tostring(computeError)
+    end
+
     if
 
-        not success
-
-        or path.Status
+        path.Status
 
             ~= Enum.PathStatus.Success
 
@@ -167,7 +181,7 @@ local function computePath(targetPosition)
 
     local distance = 0
 
-    local previous = root.Position
+    local previous = startPosition
 
     for _, waypoint in ipairs(waypoints) do
 
@@ -247,11 +261,11 @@ local function runToPosition(targetPosition)
     local map = getActiveMapModel()
     if not CONFIG.AutoCamp then return false, "AUTO_CAMP_OFF" end
     if CONFIG.MovementMode == "TP" then
-        if not isMatchContext(map) then return false, "LOCATION_CHANGED" end
+        if not canNavigateCamp(map) then return false, "LOCATION_CHANGED" end
         local ok, reason = teleportToPosition(targetPosition)
         if not ok then return false, reason end
         if not waitSeconds(0.25) then return false, "STOPPED" end
-        if not isMatchContext(map) then return false, "LOCATION_CHANGED" end
+        if not canNavigateCamp(map) then return false, "LOCATION_CHANGED" end
         local character = player.Character
         local root = character and character:FindFirstChild("HumanoidRootPart")
         if not root then return false, "CHARACTER_CHANGED" end
@@ -262,7 +276,11 @@ local function runToPosition(targetPosition)
         return true
     end
     local character = player.Character
-    local function stillValid() return CONFIG.AutoCamp and isMatchContext(map) end
+    local campMode, selectedCamp, team = CONFIG.CampMode, CONFIG.SelectedCamp, getCurrentTeam()
+    local function stillValid()
+        return canNavigateCamp(map) and CONFIG.CampMode == campMode
+            and CONFIG.SelectedCamp == selectedCamp and getCurrentTeam() == team
+    end
     for attempt = 1, CONFIG.MaxRepaths do
         if not STATE.enabled then return false, "STOPPED" end
         if not stillValid() then return false, "ROUND_ENDED" end
@@ -272,12 +290,12 @@ local function runToPosition(targetPosition)
         if not humanoid or not root or humanoid.Health <= 0 then
             return false, "CHARACTER_NOT_READY"
         end
-        local path, waypoints = computePath(targetPosition)
+        local path, waypoints, _, pathError = computePath(targetPosition)
         if not STATE.enabled or not stillValid() or player.Character ~= character then
             if path then path:Destroy() end
             return false, "MOVEMENT_CANCELLED"
         end
-        if not path then return false, "NO_PATH" end
+        if not path then return false, pathError or "NO_PATH" end
         local currentWaypoint = 1
         local blockedAt = {}
         local blockedConnection = path.Blocked:Connect(function(index)
@@ -323,134 +341,6 @@ local function runToPosition(targetPosition)
         if not waitSeconds(math.min(attempt * 0.25, 1)) then return false, "STOPPED" end
     end
     return false, "TOO_MANY_REPATHS"
-end
-
-local function runIntoPart(part)
-
-    if isPositionInsidePart(
-
-        getRoot().Position,
-
-        part
-
-    ) then
-
-        return true
-
-    end
-
-    local reached, reason =
-
-        runToPosition(part.Position)
-
-    if not reached then
-
-        return false, reason
-
-    end
-
-    if isPositionInsidePart(
-
-        getRoot().Position,
-
-        part
-
-    ) then
-
-        return true
-
-    end
-
-    local startedAt = os.clock()
-
-    while
-
-        STATE.enabled
-
-        and os.clock() - startedAt
-
-            < CONFIG.CampEnterTimeout
-
-    do
-
-        if isPositionInsidePart(
-
-            getRoot().Position,
-
-            part
-
-        ) then
-
-            stopMovement()
-
-            return true
-
-        end
-
-        local root = getRoot()
-
-        local offset =
-
-            part.Position
-
-            - root.Position
-
-        local direction = Vector3.new(
-
-            offset.X,
-
-            0,
-
-            offset.Z
-
-        )
-
-        if direction.Magnitude > 0.1 then
-
-            getHumanoid():Move(
-
-                direction.Unit,
-
-                false
-
-            )
-
-        end
-
-        RunService.RenderStepped:Wait()
-
-    end
-
-    stopMovement()
-
-    return false, "NOT_INSIDE_ZONE"
-
-end
-
-local function runIntoObject(object)
-
-    local part = getObjectPart(object)
-
-    if part then
-
-        return runIntoPart(part)
-
-    end
-
-    local target =
-
-        getObjectPosition(object)
-
-    if not target then
-
-        return false,
-
-            "NO_TARGET_POSITION"
-
-    end
-
-    return runToPosition(target)
-
 end
 
 --==================================================

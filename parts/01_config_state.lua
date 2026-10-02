@@ -96,11 +96,8 @@ local CONFIG = {
     -- Keep the currently spawned troop in Attack state.
     AttackInterval = 5,
 
-    -- Prevent repeated Begin requests while
-
-    -- the server is still processing the previous one.
-
-    SpawnPendingTimeout = 8,
+    -- Failsafe only; native Cancel/progress always keeps a request pending.
+    SpawnPendingTimeout = 30,
 
 }
 
@@ -127,7 +124,10 @@ local STATE = {
     phase = "WAITING",
     location = nil,
     lobbyPlayRequested = false,
-    lobbyPlayRequestedAt = 0,
+    lobbyCycleActive = false,
+    joinRequest = nil,
+    roundFinished = false,
+    finishedMap = nil,
     lobbyVoteName = nil,
     lobbyVoteChoice = nil,
     runId = 0,
@@ -142,6 +142,7 @@ local STATE = {
     troopPathModifiers = {},
 
     lastSlot = nil,
+    troopMap = nil,
     activeSlot = nil,
     zeroSince = nil,
 
@@ -162,30 +163,6 @@ local STATE = {
 -- PLAYER
 
 --==================================================
-
-local function getCharacter()
-
-    return player.Character
-
-        or player.CharacterAdded:Wait()
-
-end
-
-local function getHumanoid()
-
-    return getCharacter()
-
-        :WaitForChild("Humanoid")
-
-end
-
-local function getRoot()
-
-    return getCharacter()
-
-        :WaitForChild("HumanoidRootPart")
-
-end
 
 local function getCurrentTeam()
 

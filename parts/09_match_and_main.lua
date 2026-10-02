@@ -3,11 +3,15 @@
 --==================================================
 
 local function runMatchLoop(map)
-    STATE.lastSlot = nil
-    STATE.activeSlot = nil
+    -- A retry/respawn on the same map must not discard a pending request.
+    if STATE.troopMap ~= map then
+        STATE.troopMap = map
+        STATE.lastSlot = nil
+        STATE.activeSlot = nil
+        STATE.pendingSlot = nil
+        STATE.pendingUntil = 0
+    end
     STATE.zeroSince = nil
-    STATE.pendingSlot = nil
-    STATE.pendingUntil = 0
     STATE.currentCamp = nil
     STATE.troopActive = false
     STATE.lastAttackAt = 0
@@ -16,12 +20,26 @@ local function runMatchLoop(map)
     local nextCampCheckAt = 0
     local wasInsideCamp = false
 
-    while STATE.enabled and getActiveMapModel() == map do
+    local endReason = "STOPPED"
+    while STATE.enabled do
+        local gamePhase = getGamePhase()
+        if gamePhase == "RESULT" then endReason = "ROUND_FINISHED"; break end
         local area, currentMap = getLocation()
-        if currentMap ~= map or area == "LOBBY" then break end
-        if area ~= map.Name then
+        if gamePhase == "LOBBY" and area == "LOBBY" then endReason = "RETURNED_TO_LOBBY"; break end
+        if currentMap and currentMap ~= map then endReason = "ROUND_CHANGED"; break end
+        if isPlayerRespawning() then
             stopMovement()
             STATE.troopActive = false
+            STATE.zeroSince = nil
+            nextCampCheckAt = 0
+            setStatus("Waiting for player spawn", "Camp/troop automation paused")
+            waitSeconds(CONFIG.CheckInterval)
+            continue
+        end
+        if currentMap ~= map or area ~= map.Name or gamePhase ~= "MATCH" then
+            stopMovement()
+            STATE.troopActive = false
+            STATE.zeroSince = nil
             setStatus("Checking location", "Waiting for map/lobby confirmation")
             waitSeconds(CONFIG.ActiveMapCheckInterval)
             continue
@@ -30,21 +48,26 @@ local function runMatchLoop(map)
         local humanoid = character and character:FindFirstChild("Humanoid")
         local root = character and character:FindFirstChild("HumanoidRootPart")
         if not humanoid or not root or humanoid.Health <= 0 then
+            stopMovement()
             STATE.troopActive = false
+            STATE.zeroSince = nil
             nextCampCheckAt = 0
             setStatus("Waiting for character", "Camp movement will resume after respawn")
             waitSeconds(CONFIG.CheckInterval)
             continue
         end
-        local currentKey = tostring(CONFIG.AutoCamp) .. ":" .. CONFIG.CampMode .. ":" .. CONFIG.SelectedCamp
-        if currentKey ~= selectionKey then
+        observeTroopState() -- Also confirm identity/liveness outside camp.
+        local interacting = isCampInteractionActive()
+        if interacting then stopMovement() end
+        local currentKey = tostring(getCurrentTeam()) .. ":" .. tostring(CONFIG.AutoCamp) .. ":" .. CONFIG.CampMode .. ":" .. CONFIG.SelectedCamp
+        if not interacting and currentKey ~= selectionKey then
             selectionKey = currentKey
             selectedSupply = nil
             STATE.currentCamp = nil
             nextCampCheckAt = 0
             wasInsideCamp = false
         end
-        if not CONFIG.AutoCamp and CONFIG.CampMode == "Nearest" then
+        if not interacting and not CONFIG.AutoCamp and CONFIG.CampMode == "Nearest" then
             selectedSupply = getCurrentTeamCamp()
             STATE.currentCamp = selectedSupply
             if not selectedSupply then
@@ -58,7 +81,11 @@ local function runMatchLoop(map)
             nextCampCheckAt = 0
             wasInsideCamp = false
         end
-        if not selectedSupply and (CONFIG.AutoCamp or CONFIG.CampMode == "Selected")
+        if interacting and not selectedSupply then
+            selectedSupply = getCurrentTeamCamp()
+            STATE.currentCamp = selectedSupply
+        end
+        if not interacting and not selectedSupply and (CONFIG.AutoCamp or CONFIG.CampMode == "Selected")
             and os.clock() >= nextCampCheckAt then
             local reason
             selectedSupply, reason = getBestTeamSupply()
@@ -68,16 +95,24 @@ local function runMatchLoop(map)
                 nextCampCheckAt = os.clock() + CONFIG.CampRetryDelay
             end
         end
-        if not STATE.enabled or getActiveMapModel() ~= map then break end
+        if not STATE.enabled then break end
+        -- GUI can change during camp selection/movement waits.
+        if not canAutomateTroops() then
+            stopMovement()
+            STATE.zeroSince = nil
+            STATE.troopActive = false
+            waitSeconds(CONFIG.CheckInterval)
+            continue
+        end
         if selectedSupply then
             local inside = isInsideSupplyCamp(selectedSupply)
             if wasInsideCamp and not inside then nextCampCheckAt = 0 end
-            if CONFIG.AutoCamp and not inside and os.clock() >= nextCampCheckAt then
+            if canNavigateCamp(map) and not inside and os.clock() >= nextCampCheckAt then
                 setStatus("Moving to camp", selectedSupply.Name)
                 local entered, reason = withControlsDisabled(function()
                     return runIntoSupplyCamp(selectedSupply)
                 end)
-                if not STATE.enabled or getActiveMapModel() ~= map then break end
+                if not STATE.enabled then break end
                 if entered then
                     nextCampCheckAt = os.clock() + CONFIG.CampCheckInterval
                 else
@@ -100,12 +135,13 @@ local function runMatchLoop(map)
         else
             wasInsideCamp = false
         end
+        if not wasInsideCamp then STATE.zeroSince = nil end
         updateTroopAttack()
         waitSeconds(CONFIG.CheckInterval)
     end
     STATE.currentCamp = nil
     STATE.troopActive = false
-    return true
+    return true, endReason
 end
 
 --==================================================
@@ -125,7 +161,10 @@ local function isContinueText(object)
 end
 
 local function getContinueScreen(label)
-    if not label.Parent or label:IsDescendantOf(gui) or not isContinueText(label)
+    local screen = getGameScreen("MatchResult")
+    local playerGui = player:FindFirstChild("PlayerGui")
+    if not screen or not screen.Enabled or not playerGui then return nil end
+    if not label.Parent or not label:IsDescendantOf(screen) or label:IsDescendantOf(gui)
         or label.TextTransparency >= 0.99 then return nil end
     if label.AbsoluteSize.X < 1 or label.AbsoluteSize.Y < 1 then return nil end
     local camera = workspace.CurrentCamera
@@ -138,7 +177,7 @@ local function getContinueScreen(label)
     local bottom = math.min(label.AbsolutePosition.Y + label.AbsoluteSize.Y,
         camera.ViewportSize.Y - inset.Y)
     local ancestor = label
-    while ancestor and ancestor ~= player.PlayerGui do
+    while ancestor and ancestor ~= playerGui do
         if ancestor:IsA("GuiObject") and not ancestor.Visible then return nil end
         if ancestor:IsA("CanvasGroup") and ancestor.GroupTransparency >= 0.99 then return nil end
         if ancestor:IsA("GuiObject") and ancestor.ClipsDescendants then
@@ -149,7 +188,7 @@ local function getContinueScreen(label)
         end
         if right <= left or bottom <= top then return nil end
         if ancestor:IsA("ScreenGui") then
-            return ancestor.Enabled and ancestor or nil
+            return ancestor == screen and ancestor.Enabled and ancestor or nil
         end
         ancestor = ancestor.Parent
     end
@@ -157,6 +196,8 @@ local function getContinueScreen(label)
 end
 
 local function getContinueClickPoint(label, screen)
+    local playerGui = player:FindFirstChild("PlayerGui")
+    if not playerGui then return nil end
     local camera = workspace.CurrentCamera
     if not camera then return nil end
     local inset = GuiService:GetGuiInset()
@@ -174,7 +215,7 @@ local function getContinueClickPoint(label, screen)
             and screenPoint.Y < camera.ViewportSize.Y - 1 and not overOwnPanel then
             local hitLabel, obstructed = false, false
             -- Hit testing also rejects clipped/offscreen text that is still Visible.
-            for _, hit in ipairs(player.PlayerGui:GetGuiObjectsAtPosition(guiPoint.X, guiPoint.Y)) do
+            for _, hit in ipairs(playerGui:GetGuiObjectsAtPosition(guiPoint.X, guiPoint.Y)) do
                 if hit == label then hitLabel = true; break end
                 if hit:IsDescendantOf(gui)
                     or ((hit:IsA("GuiButton") or hit.Active)
@@ -226,7 +267,9 @@ local function startContinueWatcher()
     local nextClickAt, nextWarningAt = 0, 0
     local function scanAndDismiss()
         local prompt, point
-        for _, object in ipairs(player.PlayerGui:GetDescendants()) do
+        local resultScreen = getGameScreen("MatchResult")
+        local visible = resultScreen ~= nil and resultScreen.Enabled
+        for _, object in ipairs(visible and resultScreen:GetDescendants() or {}) do
             if isContinueText(object) then
                 local screen = getContinueScreen(object)
                 if screen then
@@ -237,26 +280,54 @@ local function startContinueWatcher()
                 end
             end
         end
-        local visible = prompt ~= nil
+        -- The audit has no Continue label in MatchResult. Its Victory/Defeat
+        -- text offers a non-button click target, avoiding reward buttons.
+        if visible and not prompt then
+            local result = resultScreen:FindFirstChild("Result")
+            for _, name in ipairs({"Victory", "Defeat"}) do
+                local label = result and result:FindFirstChild(name)
+                if label and getContinueScreen(label) then
+                    prompt = label
+                    point = getContinueClickPoint(label, resultScreen)
+                    if point then break end
+                end
+            end
+        end
         if STATE.continueVisible ~= visible then STATE.location = nil end
         STATE.continueVisible = visible
-        if not CONFIG.AutoContinue or not visible or not point or os.clock() < nextClickAt then return end
+        if not CONFIG.AutoContinue or not visible or not prompt or os.clock() < nextClickAt then return end
         -- Respect the user's typing/mouse input and Roblox menus.
         if GuiService.MenuIsOpen or UserInputService:GetFocusedTextBox()
+            or isGameScreenEnabled("LevelUp") or isGameScreenEnabled("Summon")
             or UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then return end
         if not STATE.enabled or STATE.runId ~= runId or not getContinueScreen(prompt) then return end
+        local restorePanel
+        if not point and main.Visible and #senders > 0 then
+            -- The automation panel often covers the entire result card.
+            -- Restore it on release, cancellation, and errors alike.
+            main.Visible = false
+            restorePanel = function() if main.Parent then main.Visible = true end end
+            STATE.continueRelease = restorePanel
+            point = getContinueClickPoint(prompt, resultScreen)
+        end
+        if not point then releaseContinueClick(); return end
         nextClickAt = os.clock() + CONFIG.ContinueClickInterval
         stopMovement()
         for _, send in ipairs(senders) do
             local pressed = pcall(send, point, true)
             if pressed then
-                STATE.continueRelease = function() send(point, false) end
+                STATE.continueRelease = function()
+                    local released, err = pcall(send, point, false)
+                    if restorePanel then restorePanel() end
+                    if not released then warn("[AUTO] Continue release: " .. tostring(err)) end
+                end
                 -- Allow InputBegan and button press to process before the release.
                 task.wait(0.05)
                 releaseContinueClick()
                 return -- The next scan verifies whether the prompt actually closed.
             end
         end
+        releaseContinueClick()
         if os.clock() >= nextWarningAt then
             nextWarningAt = os.clock() + 10
             warn("[AUTO] Continue screen detected, but simulated click is unavailable; click it manually.")
@@ -278,30 +349,99 @@ local function startContinueWatcher()
     task.spawn(STATE.continueWorker)
 end
 
+-- Only confirmed lobby entry starts a fresh vote/join/troop history.
+local function beginLobbyCycle()
+    STATE.lobbyCycleActive = true
+    STATE.roundFinished = false
+    STATE.phase = "LOBBY"
+    STATE.lobbyPreferences = {
+        priority=copySettings(CONFIG.MapPriority), enabled=copySettings(CONFIG.MapEnabled), fallback=CONFIG.MapFallback,
+    }
+    STATE.lobbyPlayRequested = false
+    STATE.lobbyVoteName = nil
+    STATE.lobbyVoteChoice = nil
+    STATE.joinRequest = nil
+    STATE.roundTeam = nil
+    STATE.currentCamp = nil
+    STATE.troopMap = nil
+    STATE.lastSlot = nil
+    STATE.pendingSlot = nil
+    STATE.pendingUntil = 0
+    STATE.activeSlot = nil
+    STATE.zeroSince = nil
+    STATE.troopActive = false
+    STATE.lastAttackAt = 0
+    setStatus("Lobby", "Auto vote / join")
+end
+
 local function mainLoop()
     startContinueWatcher()
     startTroopPathFilter()
     while STATE.enabled do
+        local gamePhase = getGamePhase()
         local area, map = getLocation()
-        if area == "LOBBY" then
-            if STATE.phase ~= "LOBBY" then
-                -- Only a confirmed return to the lobby starts a fresh Play/vote cycle.
-                STATE.phase = "LOBBY"
-                STATE.lobbyPreferences = {
-                    priority=copySettings(CONFIG.MapPriority), enabled=copySettings(CONFIG.MapEnabled), fallback=CONFIG.MapFallback,
-                }
-                STATE.lobbyPlayRequested = false
-                STATE.lobbyPlayRequestedAt = 0
-                STATE.lobbyVoteName = nil
-                STATE.lobbyVoteChoice = nil
-                STATE.currentCamp = nil
-                STATE.pendingSlot = nil
-                STATE.pendingUntil = 0
-                STATE.activeSlot = nil
-                STATE.zeroSince = nil
-                STATE.troopActive = false
-                setStatus("Lobby", "Auto vote / join")
+        if gamePhase == "RESULT" then
+            if STATE.phase ~= "RESULT" then
+                STATE.finishedMap = STATE.troopMap or map or STATE.finishedMap
             end
+            STATE.phase = "RESULT"
+            STATE.roundFinished = true
+            STATE.joinRequest = nil
+            STATE.lobbyCycleActive = false
+            STATE.currentCamp = nil
+            STATE.troopActive = false
+            STATE.zeroSince = nil
+            stopMovement()
+            setStatus("Match result", "Waiting for continue / return to lobby")
+        elseif STATE.roundFinished and not CONFIG.AutoNextRound
+            and gamePhase ~= "TRANSITION" and gamePhase ~= "UNKNOWN" then
+            setStatus("Round finished", "Auto next round is OFF")
+            return
+        elseif hasEnteredMatchLifecycle() and map then
+            STATE.phase = "MATCH"
+            STATE.lobbyCycleActive = false
+            STATE.roundTeam = getCurrentTeam() or STATE.roundTeam
+            if STATE.joinRequest then STATE.joinRequest.accepted = true end
+            setStatus("Match", map.Name)
+            local ok, success, reason = pcall(runMatchLoop, map)
+            stopMovement()
+            clearMovementConnections()
+            pcall(function() Controls:Enable() end)
+            if not STATE.enabled then break end
+            if not ok then
+                STATE.troopActive = false
+                STATE.zeroSince = nil
+                setStatus("Match retry", tostring(success))
+                waitSeconds(CONFIG.FlowRetryDelay)
+            elseif success and (reason == "ROUND_FINISHED" or reason == "RETURNED_TO_LOBBY"
+                or reason == "ROUND_CHANGED") then
+                STATE.roundFinished = true
+                STATE.finishedMap = map
+            end
+        elseif gamePhase == "PICK_TEAM" or (STATE.joinRequest and not STATE.joinRequest.accepted) then
+            stopMovement()
+            STATE.zeroSince = nil
+            STATE.troopActive = false
+            STATE.phase = "JOINING"
+            if not map and gamePhase == "LOBBY" and area == "LOBBY" and STATE.joinRequest
+                and os.clock() - STATE.joinRequest.sentAt >= CONFIG.JoinTimeout then
+                STATE.finishedMap = STATE.joinRequest.map
+                STATE.joinRequest = nil
+                STATE.lobbyCycleActive = false
+                setStatus("Lobby", "Previous join's map ended")
+            elseif map and CONFIG.AutoJoin then
+                local ok, success, reason = pcall(joinMatch, map)
+                if not ok or not success then
+                    if reason == "JOIN_MAP_CHANGED" then STATE.lobbyCycleActive = false end
+                    setStatus("Join waiting", tostring(ok and reason or success))
+                    waitSeconds(CONFIG.FlowRetryDelay)
+                end
+            else
+                setStatus("Waiting for team selection", CONFIG.AutoJoin and "Map is loading" or "Auto join is OFF")
+            end
+        elseif gamePhase == "LOBBY" and area == "LOBBY" then
+            if not STATE.lobbyCycleActive then beginLobbyCycle() end
+            STATE.phase = "LOBBY"
             local ok, success, reason = pcall(runLobbyFlow)
             if not STATE.enabled then break end
             if not ok or not success then
@@ -312,29 +452,11 @@ local function mainLoop()
                     waitSeconds(CONFIG.FlowRetryDelay)
                 end
             end
-        elseif map and area == map.Name then
-            STATE.phase = "MATCH"
-            STATE.roundTeam = getCurrentTeam()
-            setStatus("Match", map.Name)
-            local ok, reason = pcall(runMatchLoop, map)
-            stopMovement()
-            clearMovementConnections()
-            pcall(function() Controls:Enable() end)
-            if not STATE.enabled then break end
-            if not ok then
-                STATE.troopActive = false
-                setStatus("Match retry", tostring(reason))
-                waitSeconds(CONFIG.FlowRetryDelay)
-            end
-            if ok and not CONFIG.AutoNextRound then
-                setStatus("Round finished", "Auto next round is OFF")
-                return
-            end
-            -- A new map or return to lobby is handled by the next location sample.
         else
             stopMovement()
             STATE.troopActive = false
-            setStatus("Checking location", "Waiting for character or teleport to finish")
+            STATE.zeroSince = nil
+            setStatus("Waiting for game state", gamePhase .. " | character / map transition")
         end
         waitSeconds(CONFIG.ActiveMapCheckInterval)
     end

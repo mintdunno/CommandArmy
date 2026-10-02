@@ -6,26 +6,19 @@ WHY THIS EXISTS
 The old script was one very large file. That made it hard to isolate bugs and
 some executors may reject or truncate large pasted scripts.
 
-This build does NOT refactor the automation logic yet. The current hardened
-source was cut into smaller files in the exact same order. loader.lua reads the
-parts, concatenates them, then compiles the reconstructed source with loadstring.
-That means we can now fix one area at a time without rewriting the whole script.
+The source is split into ordered parts. loader.lua downloads those parts from
+GitHub main, concatenates them, and compiles the source with loadstring. Lifecycle
+guards combine audited GUI state with confirmed world location; UNKNOWN location
+does not authorize another join or troop spawn.
 
 HOW TO RUN
 ----------
-1. Put the entire "CommandArmy" folder inside the local workspace used by your
-   executor's readfile()/isfile() functions.
-2. Execute CommandArmy/loader.lua.
+1. Execute loader.lua in a Roblox client executor supporting HTTP and loadstring.
+2. The loader fetches parts from mintdunno/CommandArmy on GitHub's main branch.
 3. Do NOT execute files inside parts/ directly.
 
-If your executor stores the folder under a different path, edit this line at the
-top of loader.lua:
-
-    local ROOT = "CommandArmy"
-
-Example:
-
-    local ROOT = "scripts/CommandArmy"
+Local edits to parts are not used by this HTTP loader until published to the
+configured GitHub branch. To target another published branch, edit BASE in loader.lua.
 
 FILES
 -----
@@ -71,7 +64,8 @@ parts/11_live_info_and_init.lua
 
 DEBUGGING RULE
 --------------
-From now on, fix ONE subsystem at a time. For example, if troop cycling is wrong,
-work only in parts/08_troops.lua and test before touching lobby/pathfinding.
+Keep changes focused, and review shared lifecycle guards when a transition
+affects joining, camp movement, and troops together. Player Spawn and MatchUI
+SpawnTroops are separate processes. MatchResult pauses automation until return.
 
 Keep a copy of the last working folder before every change.

@@ -267,61 +267,6 @@ local function withControlsDisabled(callback)
     return result, reason
 end
 
-local function getObjectPart(object)
-
-    if not object then
-
-        return nil
-
-    end
-
-    if object:IsA("BasePart") then
-
-        return object
-
-    end
-
-    if object:IsA("Model") then
-
-        if object.PrimaryPart then
-
-            return object.PrimaryPart
-
-        end
-
-    end
-
-    return object:FindFirstChildWhichIsA(
-
-        "BasePart",
-
-        true
-
-    )
-
-end
-
-local function getObjectPosition(object)
-    if not object then
-        return nil
-    end
-
-    if object:IsA("BasePart") then
-        return object.Position
-    end
-
-    if object:IsA("Model") then
-        return object:GetPivot().Position
-    end
-
-    local part = object:FindFirstChildWhichIsA(
-        "BasePart",
-        true
-    )
-
-    return part and part.Position or nil
-end
-
 -- Lobby voting verifies the actual trigger footprint, including thin floor pads.
 local function getVotePart(object)
     if not object then return nil end
@@ -403,11 +348,11 @@ local function moveToObject(object, stillValid)
     local insideSince, lastMoveAt = nil, -math.huge
     while STATE.enabled and os.clock() - startedAt < CONFIG.MoveTimeout do
         if not CONFIG.AutoVote then stopMovement(); return false, "AUTO_VOTE_OFF" end
-        if STATE.continueVisible then
+        if getGamePhase() ~= "LOBBY" or getCurrentArea() ~= "LOBBY" then
             stopMovement()
-            return false, "CONTINUE_SCREEN"
+            return false, "LOCATION_CHANGED"
         end
-        if getActiveMapModel() then
+        if getJoinableMap() then
             stopMovement()
             return true, "ROUND_STARTED"
         end
@@ -442,40 +387,6 @@ local function moveToObject(object, stillValid)
     end
     stopMovement()
     return false, STATE.enabled and "VOTE_MOVE_TIMEOUT" or "STOPPED"
-end
-
-local function isPositionInsidePart(
-
-    position,
-
-    part
-
-)
-
-    local localPosition =
-
-        part.CFrame:PointToObjectSpace(
-
-            position
-
-        )
-
-    local halfSize = part.Size / 2
-
-    return
-
-        math.abs(localPosition.X)
-
-            <= halfSize.X
-
-        and math.abs(localPosition.Y)
-
-            <= halfSize.Y
-
-        and math.abs(localPosition.Z)
-
-            <= halfSize.Z
-
 end
 
 --==================================================

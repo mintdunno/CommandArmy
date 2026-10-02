@@ -75,8 +75,10 @@ local function waitForBestVote()
     local lastName, lastChoice, stableSince
     while STATE.enabled and os.clock() - startedAt < CONFIG.VoteSearchTimeout do
         if not CONFIG.AutoVote then return nil, nil, "AUTO_VOTE_OFF" end
-        if STATE.continueVisible then return nil, nil, "CONTINUE_SCREEN" end
-        if getActiveMapModel() then return nil, nil, "ROUND_STARTED" end
+        if getGamePhase() ~= "LOBBY" or getCurrentArea() ~= "LOBBY" then
+            return nil, nil, "LOCATION_CHANGED"
+        end
+        if getJoinableMap() then return nil, nil, "ROUND_STARTED" end
         local mapName, choice, ready = getBestVote()
         if mapName and ready then
             if mapName ~= lastName or choice ~= lastChoice then
@@ -101,19 +103,17 @@ end
 local function voteBestMap()
     if not CONFIG.AutoVote then return false, "AUTO_VOTE_OFF" end
     if not STATE.enabled then return false, "STOPPED" end
-    if getActiveMapModel() then return true, "ROUND_STARTED" end
+    if getJoinableMap() then return true, "ROUND_STARTED" end
     if getCurrentArea() ~= "LOBBY" then return false, "LOCATION_CHANGED" end
     local choicesNow = getVoteChoices()
     local boardReadable = next(choicesNow) ~= nil
-    local shouldRequestPlay = not boardReadable and (not STATE.lobbyPlayRequested
-        or os.clock() - (STATE.lobbyPlayRequestedAt or 0) >= 5)
+    local shouldRequestPlay = not boardReadable and not STATE.lobbyPlayRequested
     if shouldRequestPlay then
         local fired, fireError = pcall(function()
             LobbyTeleportRequest:FireServer(CONFIG.LobbyMarker)
         end)
         if not fired then return false, "PLAY_REMOTE_ERROR: " .. tostring(fireError) end
         STATE.lobbyPlayRequested = true
-        STATE.lobbyPlayRequestedAt = os.clock()
         if not waitSeconds(CONFIG.PostTeleportDelay) then return false, "STOPPED" end
     end
     local lastReason = "VOTE_BOARD_TIMEOUT"
@@ -133,7 +133,7 @@ local function voteBestMap()
         end
         lastReason = moveReason
         if not STATE.enabled then return false, "STOPPED" end
-        if getActiveMapModel() then return true, "ROUND_STARTED" end
+        if getJoinableMap() then return true, "ROUND_STARTED" end
         setStatus("Vote retry", tostring(lastReason))
         if not waitSeconds(0.25) then return false, "STOPPED" end
     end
@@ -146,40 +146,66 @@ end
 
 --==================================================
 
-local function waitForActiveMap()
-    -- Kept as a non-blocking lookup; the main loop owns transition polling.
-    return getActiveMapModel()
-end
-
+-- The main worker polls this operation. A timeout cannot turn UNKNOWN or
+-- player spawning into permission to send another TeamRequest.
 local function joinMatch(map)
     if not CONFIG.AutoJoin then return false, "AUTO_JOIN_OFF" end
+    if not STATE.enabled then return false, "STOPPED" end
+    if not map or getActiveMapModel() ~= map then return false, "MAP_LOADING" end
+    local phase = getGamePhase()
+    if phase == "RESULT" then return false, "ROUND_ENDED" end
+    if map == STATE.finishedMap and phase ~= "PICK_TEAM" then return false, "WAITING_FOR_NEXT_ROUND" end
+    if phase == "PICK_TEAM" then STATE.finishedMap = nil end
+
+    local request = STATE.joinRequest
+    if hasEnteredMatchLifecycle() then
+        if request then request.accepted = true end
+        STATE.roundTeam = getCurrentTeam() or (request and request.team)
+        return true, "MATCH_LIFECYCLE_ENTERED"
+    end
+    if request then
+        if request.map ~= map then
+            STATE.joinRequest = nil
+            return false, "JOIN_MAP_CHANGED"
+        end
+        -- Only a confirmed lobby, with no lifecycle/transition UI, can
+        -- establish rejection/return. PickTeam may remain up during a join.
+        local area = getLocation()
+        if phase == "LOBBY" and area == "LOBBY" then
+            request.lobbySince = request.lobbySince or os.clock()
+            if os.clock() - request.sentAt >= CONFIG.JoinTimeout
+                and os.clock() - request.lobbySince >= CONFIG.AreaConfirmTime then
+                STATE.joinRequest = nil
+                return false, "JOIN_RETURNED_TO_LOBBY"
+            end
+        else
+            request.lobbySince = nil
+        end
+        setStatus("Joining team", request.team .. " | waiting for game state")
+        return true, "JOIN_PENDING"
+    end
+
+    if phase ~= "PICK_TEAM" and (phase ~= "LOBBY" or getCurrentArea() ~= "LOBBY") then
+        return true, "JOIN_TRANSITION"
+    end
     local team = CONFIG.Team
     if team ~= "Attackers" and team ~= "Defenders" then return false, "INVALID_TEAM" end
-    if not STATE.enabled then return false, "STOPPED" end
-    if not map or getActiveMapModel() ~= map then return false, "ROUND_ENDED" end
-    STATE.roundTeam = team -- UI changes apply to the NEXT join only.
-    setStatus("Joining team", team)
-    if getCurrentTeam() ~= team or getCurrentArea() ~= map.Name then
-        local fired, fireError = pcall(function() TeamRequest:FireServer(team) end)
-        if not fired then return false, "TEAM_REMOTE_ERROR: " .. tostring(fireError) end
+    request = {map=map, team=team, sentAt=os.clock()}
+    STATE.joinRequest = request
+    STATE.roundTeam = team -- UI changes apply to the next request only.
+    setStatus("Joining team", team .. " | waiting for game state")
+    local fired, fireError = pcall(function() TeamRequest:FireServer(team) end)
+    if not fired then
+        STATE.joinRequest = nil
+        return false, "TEAM_REMOTE_ERROR: " .. tostring(fireError)
     end
-    local startedAt = os.clock()
-    while STATE.enabled and getActiveMapModel() == map
-        and os.clock() - startedAt < CONFIG.JoinTimeout do
-        if not CONFIG.AutoJoin then return false, "AUTO_JOIN_OFF" end
-        if getCurrentTeam() == team and getCurrentArea() == map.Name then return true end
-        task.wait(0.1)
-    end
-    if not STATE.enabled then return false, "STOPPED" end
-    if getActiveMapModel() ~= map then return false, "ROUND_ENDED" end
-    return false, "JOIN_TIMEOUT (team: " .. tostring(getCurrentTeam())
-        .. ", area: " .. getCurrentArea() .. ")"
+    return true, "JOIN_PENDING"
 end
 
 local function runLobbyFlow()
     local area, map = getLocation()
     if area ~= "LOBBY" then return false, "LOCATION_CHANGED" end
-    if map then
+    if map and map ~= STATE.finishedMap then
         if not CONFIG.AutoJoin then setStatus("Lobby", "Auto join is OFF"); return true end
         -- An active round can be joined without replaying the lobby teleport.
         return joinMatch(map)

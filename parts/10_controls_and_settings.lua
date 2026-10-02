@@ -37,11 +37,15 @@ local function startAutomation()
     STATE.lobbyPreferences = nil
     STATE.location = nil
     STATE.lobbyPlayRequested = false
-    STATE.lobbyPlayRequestedAt = 0
+    STATE.lobbyCycleActive = false
+    STATE.joinRequest = nil
+    STATE.roundFinished = false
+    STATE.finishedMap = nil
     STATE.lobbyVoteName = nil
     STATE.lobbyVoteChoice = nil
 
     STATE.lastSlot = nil
+    STATE.troopMap = nil
     STATE.activeSlot = nil
     STATE.zeroSince = nil
     STATE.pendingSlot = nil
@@ -208,7 +212,8 @@ function UI.renderSlots()
 end
 UI.number(troopPage,"Kiểm tra / về camp (giây)","CampCheckInterval",1,120,1)
 UI.number(troopPage,"Gửi lại Attack (giây)","AttackInterval",1,30,1)
-UI.number(troopPage,"Chờ xác nhận spawn (giây)","SpawnPendingTimeout",3,30,1)
+UI.number(troopPage,"Giới hạn dự phòng spawn (giây)","SpawnPendingTimeout",30,120,1)
+UI.note(troopPage,"Cancel / tiến trình spawn luôn giữ slot chờ; giới hạn chỉ dùng khi tiến trình đã dừng.")
 
 UI.choice(movementPage,"Cách di chuyển","MovementMode",{"Walk","TP"},{"Đi bộ (mặc định)","TP"})
 UI.note(movementPage,"Đi bộ: giữ cách chạy và tìm đường hiện tại. TP: chuyển tới đích, rồi kiểm tra vị trí thực. Áp dụng cho cả vote và camp ở lần di chuyển kế tiếp.")
@@ -240,7 +245,7 @@ local loadPreset=button(presetRow,"Tải",UDim2.new(0.31,0,1,0),UDim2.fromScale(
 local resetPreset=button(presetRow,"Mặc định",UDim2.new(0.31,0,1,0),UDim2.fromScale(0.69,0))
 
 UI.numericLimits={VoteHoldTime={0.3,5},VoteSearchTimeout={2,30},VoteRetries={1,6,true},
-    CampCheckInterval={1,120},AttackInterval={1,30},SpawnPendingTimeout={3,30},
+    CampCheckInterval={1,120},AttackInterval={1,30},SpawnPendingTimeout={30,120},
     StuckTimeout={1,10},MaxRepaths={1,15,true},CampRetryDelay={1,15},WaypointTimeout={5,60},
     MoveTimeout={3,60},ContinueClickInterval={0.5,5},UIScale={0.65,1.4},UITransparency={0,0.7}}
 UI.enums={Team={"Attackers","Defenders"},MovementMode={"Walk","TP"},CampMode={"Nearest","Selected"},

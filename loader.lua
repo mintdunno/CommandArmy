@@ -292,7 +292,7 @@ task.wait()
 -- Their exact order must not change.
 
 local source =
-    table.concat(sources)
+    table.concat(sources, "\n")
 
 --==================================================
 -- COMPILE
